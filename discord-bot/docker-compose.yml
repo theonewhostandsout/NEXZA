@@ -1,0 +1,10 @@
+services:
+  nexza-discord-bot:
+    image: python:3.11-slim
+    working_dir: /app
+    command: bash -lc "pip install -r requirements.txt && python bot.py"
+    volumes:
+      - ./:/app
+    env_file:
+      - .env
+    restart: unless-stopped

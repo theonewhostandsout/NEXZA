@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXZA AI Console</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        #chat-log::-webkit-scrollbar { width: 8px; }
+        #chat-log::-webkit-scrollbar-track { background: #1f2937; }
+        #chat-log::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        .user-msg { background-color: #3b82f6; }
+        .ai-msg { background-color: #374151; }
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-left-color: #fff;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col h-screen">
+    <header class="bg-gray-800 p-4 shadow-md flex justify-between items-center">
+        <h1 class="text-2xl font-bold">NEXZA AI - Admin Console</h1>
+        <div class="flex items-center space-x-2">
+            <label for="persona-select" class="text-sm font-medium">Persona:</label>
+            <select id="persona-select" class="bg-gray-700 border border-gray-600 rounded-md p-1 text-sm focus:ring-blue-500 focus:border-blue-500">
+                <option value="NEXZA_ASSISTANT">Personal Assistant</option>
+                <option value="ADMIN_MODE">Admin Mode</option>
+            </select>
+        </div>
+    </header>
+
+    <main id="chat-log" class="flex-1 p-6 overflow-y-auto space-y-4">
+        </main>
+
+    <footer class="bg-gray-800 p-4">
+        <div class="max-w-3xl mx-auto">
+            <form id="chat-form" class="flex items-center space-x-4 bg-gray-700 rounded-lg p-2">
+                <input type="file" id="file-input" class="hidden">
+                <button type="button" id="upload-button" class="p-2 text-gray-400 hover:text-white">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                </button>
+                <input type="text" id="user-input" placeholder="Enter your command..." class="flex-1 p-2 bg-gray-700 focus:outline-none">
+                <button type="submit" id="send-button" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-5 rounded-lg transition duration-300">Send</button>
+            </form>
+            <div id="file-preview" class="mt-2 text-sm text-gray-400"></div>
+        </div>
+    </footer>
+
+    <script>
+        const chatForm = document.getElementById('chat-form');
+        const userInput = document.getElementById('user-input');
+        const fileInput = document.getElementById('file-input');
+        const uploadButton = document.getElementById('upload-button');
+        const filePreview = document.getElementById('file-preview');
+        const personaSelect = document.getElementById('persona-select');
+        let fileToUpload = null;
+        let sessionId = `web_session_${Date.now()}`;
+
+        uploadButton.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', handleFileSelect);
+        chatForm.addEventListener('submit', handleFormSubmit);
+
+        function handleFileSelect(e) {
+            fileToUpload = e.target.files[0];
+            if (!fileToUpload) return;
+            filePreview.textContent = `Selected file: ${fileToUpload.name}`;
+        }
+        
+        async function handleFormSubmit(e) {
+            e.preventDefault();
+            const userMessage = userInput.value.trim();
+            if (!userMessage && !fileToUpload) return;
+
+            appendMessage('user', userMessage || `Uploading ${fileToUpload.name}`);
+            const loadingIndicator = appendMessage('ai', '<div class="spinner"></div>');
+
+            try {
+                if (fileToUpload) {
+                    const formData = new FormData();
+                    formData.append('file', fileToUpload);
+
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        body: formData,
+                    });
+
+                    if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+                    const data = await response.json();
+                    
+                    // FIX: Changed data.original_name to data.original_filename
+                    let aiSummary = `File '${data.original_filename}' organized successfully.\n`;
+                    aiSummary += `Moved to: ${data.final_path}\n`;
+                    aiSummary += `Summary: ${data.analysis.summary}\n`;
+                    aiSummary += `Tags: ${data.analysis.tags.join(', ')}`;
+                    loadingIndicator.innerHTML = `<p>${aiSummary.replace(/\n/g, '<br>')}</p>`;
+
+                } else {
+                    // FIX: Added 'persona' to the payload
+                    const payload = {
+                        message: userMessage,
+                        session_id: sessionId,
+                        persona: personaSelect.value 
+                    };
+
+                    const response = await fetch('/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+
+                    if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+                    const data = await response.json();
+                    const aiMessage = data.response;
+                    loadingIndicator.innerHTML = `<p>${aiMessage.replace(/\n/g, '<br>')}</p>`;
+                }
+
+            } catch (error) {
+                console.error('Error:', error);
+                loadingIndicator.innerHTML = '<p class="text-red-400">Error: Could not connect to the server.</p>';
+            } finally {
+                resetInput();
+            }
+        }
+        
+        function resetInput() {
+            userInput.value = '';
+            fileInput.value = null;
+            fileToUpload = null;
+            filePreview.textContent = '';
+        }
+
+        function appendMessage(sender, text) {
+            const chatLog = document.getElementById('chat-log');
+            const messageWrapper = document.createElement('div');
+            messageWrapper.classList.add('flex', 'flex-col', 'items-start', 'space-y-2', 'max-w-xl');
+            const messageBubble = document.createElement('div');
+            messageBubble.classList.add('p-4', 'rounded-lg', 'whitespace-pre-wrap');
+
+            messageBubble.innerHTML = text.includes('<') ? text : `<p>${text}</p>`;
+
+            if (sender === 'user') {
+                messageWrapper.classList.add('ml-auto', 'items-end');
+                messageBubble.classList.add('user-msg');
+            } else {
+                messageWrapper.classList.add('mr-auto', 'items-start');
+                messageBubble.classList.add('ai-msg');
+            }
+            
+            messageWrapper.appendChild(messageBubble);
+            chatLog.appendChild(messageWrapper);
+            chatLog.scrollTop = chatLog.scrollHeight;
+            return messageBubble;
+        }
+
+        // Add initial welcome message
+        appendMessage('ai', 'Welcome. I am NEXZA, your file management assistant. Please upload a file or ask me a question about your documents.');
+    </script>
+</body>
+</html>
