@@ -1,8 +1,6 @@
 import requests
 import json
-import mimetypes
 import os
-import hashlib
 import re
 from datetime import datetime, timedelta
 from functools import wraps
@@ -99,6 +97,50 @@ file_index_manager = FileIndexManager()
 
 # --- AI and Response Logic ---
 
+def _detect_interface(request_obj) -> str:
+    """Detects the client interface from the request to select a persona."""
+    if 'X-Twilio-Signature' in request_obj.headers or request_obj.form.get("From"):
+        return "phone_agent"
+
+    client_header = request_obj.headers.get('X-Client', '').lower()
+    if client_header == 'discord' or request_obj.args.get('interface') == 'discord':
+        return "discord_helper"
+    elif client_header == 'ios':
+        return "mobile_assistant"
+
+    return "assistant"
+
+def _clean_output(text: str) -> str:
+    """Removes debug/meta text and unwanted artifacts from AI output, while preserving Markdown."""
+    if not text:
+        return ""
+
+    # 1. Remove fenced code blocks for system/debug/meta
+    text = re.sub(r"```(system|debug|meta)\n.*?\n```\s*", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+    # 2. List of phrases to strip (whole word, case-insensitive)
+    debug_phrases = [
+        "need to be concise",
+        "respond as N-E-X-Z-A",
+        "thinking out loud",
+        "system prompt",
+        "meta-thought"
+    ]
+
+    for phrase in debug_phrases:
+        text = re.sub(r'\b' + re.escape(phrase) + r'\b', '', text, flags=re.IGNORECASE)
+
+    # 3. Collapse 3+ consecutive newlines to 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # 4. Trim trailing spaces from each line
+    lines = text.split('\n')
+    trimmed_lines = [line.rstrip() for line in lines]
+    text = '\n'.join(trimmed_lines)
+
+    # 5. Final trim of the whole string
+    return text.strip()
+
 def make_ai_request(messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> Optional[str]:
     """Centralized AI request handling"""
     try:
@@ -123,20 +165,30 @@ def make_ai_request(messages: List[Dict[str, str]], temperature: float, max_toke
         logger.error(f"AI request failed: {e}")
     return None
 
-def get_smart_response(user_input: str, session_id: str, fs_manager, persona: str = 'NEXZA_ASSISTANT') -> str:
-    """Determines whether to search files or just chat."""
+def get_smart_response(user_input: str, session_id: str, fs_manager, persona: Optional[str] = None) -> str:
+    """Determines persona, gets a response from the AI, and cleans the output."""
+
+    # If no persona is provided by the caller, detect it from the request
+    if not persona:
+        persona = _detect_interface(request)
+
+    logger.info(f"Using persona '{persona}' for session {session_id}")
+
     return get_web_chat_response(user_input, session_id, fs_manager, persona)
 
-def get_web_chat_response(user_input: str, session_id: str, fs_manager, persona: str = 'NEXZA_ASSISTANT') -> str:
+def get_web_chat_response(user_input: str, session_id: str, fs_manager, persona: str) -> str:
     """Handles generating a chat response using conversation history."""
     try:
         prompt_map = {
-            'NEXZA_ASSISTANT': Config.NEXZA_ASSISTANT_PROMPT,
-            'ADMIN_MODE': Config.ADMIN_PROMPT
+            'assistant': Config.NEXZA_ASSISTANT_PROMPT,
+            'admin': Config.ADMIN_PROMPT,
+            'phone_agent': Config.PHONE_AGENT_PROMPT,
+            'discord_helper': Config.DISCORD_HELPER_PROMPT,
+            'mobile_assistant': Config.NEXZA_ASSISTANT_PROMPT, # mobile_assistant can use the default assistant prompt
+            'restaurant': Config.RESTAURANT_INFO_PROMPT,
         }
         system_prompt = prompt_map.get(persona, Config.NEXZA_ASSISTANT_PROMPT)
         
-        # FIX: Removed extra period before 'add_message'
         conversation_manager.add_message(session_id, {"role": "user", "content": user_input}, system_prompt=system_prompt)
         
         messages = conversation_manager.get_history(session_id)
@@ -144,15 +196,8 @@ def get_web_chat_response(user_input: str, session_id: str, fs_manager, persona:
         ai_response = make_ai_request(messages, temperature=Config.AI_TEMPERATURE, max_tokens=Config.AI_MAX_TOKENS)
         
         if ai_response:
-            # Clean up the AI's response to remove the "internal monologue"
-            clean_response = ai_response
-            greetings = ["Hello!", "Hi there!", "Hi!"]
-            for greeting in greetings:
-                if greeting in ai_response:
-                    # Take the greeting and everything after it
-                    clean_response = ai_response[ai_response.find(greeting):]
-                    break
-            
+            # Clean the raw output from the model before returning
+            clean_response = _clean_output(ai_response)
             conversation_manager.add_message(session_id, {"role": "assistant", "content": clean_response})
             return clean_response
         else:

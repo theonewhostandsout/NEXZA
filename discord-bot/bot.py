@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 # --------- ENV ---------
 load_dotenv()
 DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN")            # REQUIRED
-NEXZA_ENDPOINT  = os.getenv("NEXZA_ENDPOINT", "http://localhost:5000/api/discord")
+NEXZA_ENDPOINT  = os.getenv("NEXZA_ENDPOINT", "http://localhost:5000/api/discord?interface=discord")
 NEXZA_API_KEY   = os.getenv("NEXZA_API_KEY", "")
 GUILD_ID_STR    = os.getenv("GUILD_ID", "").strip()     # optional but recommended
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "25"))
@@ -27,7 +27,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree  # single command tree ONLY
 
 def _headers():
-    return {"Content-Type": "application/json", "X-API-Key": NEXZA_API_KEY}
+    return {
+        "Content-Type": "application/json",
+        "X-API-Key": NEXZA_API_KEY,
+        "X-Client": "discord",
+    }
 
 def call_backend(payload: dict) -> dict:
     r = requests.post(NEXZA_ENDPOINT, headers=_headers(),

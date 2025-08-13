@@ -6,7 +6,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
-import os, hashlib, secrets
+import os, secrets
 from datetime import datetime
 from typing import Dict, Any
 
@@ -51,8 +51,7 @@ limiter = Limiter(
     strategy="fixed-window",
 )
 
-AI_BASE_DIR = "D:/NEXZA AI/"
-fs_manager = FileSystemManager(base_dir=AI_BASE_DIR)
+fs_manager = FileSystemManager(base_dir=Config.AI_BASE_DIR)
 
 # Optional shared secret for bot requests (set this in your environment if you want it enforced)
 DISCORD_SHARED_KEY = os.getenv("NEXZA_API_KEY", "").strip()
@@ -148,7 +147,7 @@ def favicon():
 @app.route("/health", methods=["GET"])
 @limiter.exempt
 def health_check():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat(), "version": "2.0.0"}), 200
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat(), "version": Config.APP_VERSION}), 200
 
 @app.route("/health/detailed", methods=["GET"])
 @limiter.limit("10 per minute")
@@ -233,7 +232,7 @@ def web_chat():
         data = request.get_json(force=True) or {}
         user_input = (data.get("message") or "").strip()
         session_id = (data.get("session_id") or "").strip()
-        persona = data.get("persona", "NEXZA_ASSISTANT")
+        persona = data.get("persona")
 
         if not session_id:
             session_id = f"web_{secrets.token_hex(8)}"
@@ -277,7 +276,7 @@ def api_discord_chat():
             return jsonify({"ok": False, "error": "No message provided"}), 400
 
         session_id = (data.get("session_id") or f"discord_{secrets.token_hex(8)}").strip()
-        persona = data.get("persona", "NEXZA_ASSISTANT")
+        persona = data.get("persona")
 
         # Sanitize inputs
         session_id = sanitize_user_input(session_id, max_length=128)
@@ -304,7 +303,7 @@ def initialize_application():
     try:
         logger.info("=" * 60)
         logger.info("🚀 Starting NEXZA AI Flask Backend Server v2.0")
-        logger.info(f"Base directory: {AI_BASE_DIR}")
+        logger.info(f"Base directory: {Config.AI_BASE_DIR}")
         logger.info(f"Debug mode: {Config.DEBUG}")
         logger.info(f"Max file size: {app.config['MAX_CONTENT_LENGTH'] / (1024*1024)}MB")
         logger.info("=" * 60)
