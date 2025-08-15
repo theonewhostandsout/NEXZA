@@ -1,17 +1,15 @@
 from flask import Blueprint, request, Response
 from .utils import clean_user_facing_text
+from .ai_client import get_reply
 
 twilio_bp = Blueprint('twilio', __name__)
-
-# Helper reply function (stub)
-def reply(user_input=None):
-    return f"Thanks for contacting NEXZA" + (f": {user_input}" if user_input else "")
 
 @twilio_bp.route('/voice', methods=['POST'])
 def twilio_voice():
     try:
         user_input = request.form.get('SpeechResult', '')
-        response_text = clean_user_facing_text(reply(user_input))
+        from_ = request.form.get('From', '')
+        response_text = clean_user_facing_text(get_reply(user_input, f"voice:{from_}", "PHONE_AGENT"))
         twiml = f"<Response><Say>{response_text}</Say></Response>"
         return Response(twiml, mimetype='text/xml')
     except Exception:
@@ -23,7 +21,8 @@ def twilio_voice():
 def twilio_sms():
     try:
         user_input = request.form.get('Body', '')
-        response_text = clean_user_facing_text(reply(user_input))
+        from_ = request.form.get('From', '')
+        response_text = clean_user_facing_text(get_reply(user_input, f"sms:{from_}", "PHONE_AGENT"))
         return Response(response_text, mimetype='text/plain')
     except Exception:
         fallback = "I'm having trouble connecting to the AI model. Please try again shortly."
