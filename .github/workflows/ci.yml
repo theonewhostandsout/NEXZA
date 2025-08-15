@@ -19,7 +19,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -q flask pytest requests
+          pip install -q flask pytest requests twilio
       - name: Run tests
         run: |
           export PYTHONPATH="${{ github.workspace }}"
