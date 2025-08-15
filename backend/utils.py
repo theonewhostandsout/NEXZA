@@ -11,7 +11,12 @@ from twilio.request_validator import RequestValidator
 from typing import Dict, List, Tuple, Any, Optional
 from threading import Lock
 from collections import deque
-from config import Config, logger
+
+try:
+    from .config import Config, logger
+except ImportError:
+    # fallback if run as a script without package context
+    from config import Config, logger
 
 # --- Conversation Manager ---
 class ConversationManager:
