@@ -1,10 +1,13 @@
 import pytest
-from app import app as flask_app
+from flask import Flask
+from backend.twilio_routes import twilio_bp
 
 @pytest.fixture
 def client():
-    flask_app.config["TESTING"] = True
-    with flask_app.test_client() as c:
+    app = Flask(__name__)
+    app.config["TESTING"] = True
+    app.register_blueprint(twilio_bp)
+    with app.test_client() as c:
         yield c
 
 def test_sms_ok(client):
