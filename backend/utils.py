@@ -271,3 +271,18 @@ def sanitize_user_input(text: str, max_length: int = 10000) -> str:
 def initialize_system(fs_manager):
     """Initializes system components like the file index."""
     logger.info("System initialization complete.")
+
+def clean_user_facing_text(text):
+    import re
+    # Remove triple-backticked code blocks
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    # Remove lines starting with unwanted prefixes
+    text = '\n'.join(
+        line for line in text.splitlines()
+        if not re.match(r'^(thoughts:|analysis:|meta:|system:|debug:)', line.strip(), re.IGNORECASE)
+    )
+    # Remove bracketed stage notes like [thinking...] or (internal note)
+    text = re.sub(r'\[(.*?)\]|\((.*?)\)', '', text)
+    # Collapse extra whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text

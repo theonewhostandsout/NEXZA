@@ -1,0 +1,23 @@
+name: CI
+on:
+  push:
+    branches:
+      - twilio-voice-sms-integration
+  pull_request:
+    branches:
+      - twilio-voice-sms-integration
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install flask pytest
+      - name: Run tests
+        run: pytest -q backend/test_twilio.py
