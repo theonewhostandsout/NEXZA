@@ -97,8 +97,12 @@ class Config:
     
     # Twilio configuration (optional)
     TWILIO_ENABLED = os.environ.get('TWILIO_ENABLED', 'False').lower() in ('true', '1', 't')
-    TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', None)
-    TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', None)
+    AI_BASE_DIR = os.getenv(
+        "AI_BASE_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "nexza_data")
+    )
+    TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+    TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
     
     # AI Personas and Prompts
     NEXZA_ASSISTANT_PROMPT = os.environ.get('NEXZA_ASSISTANT_PROMPT', """
