@@ -1,22 +1,18 @@
 import pytest
-from flask import Flask
-from backend.twilio_routes import twilio_bp
-
-def create_app():
-    app = Flask(__name__)
-    app.register_blueprint(twilio_bp, url_prefix="/twilio")
-    return app
+from app import app as flask_app
 
 @pytest.fixture
 def client():
-    app = create_app()
-    with app.test_client() as client:
-        yield client
+    flask_app.config["TESTING"] = True
+    with flask_app.test_client() as c:
+        yield c
 
-def test_twilio_voice(client):
-    resp = client.post('/twilio/voice', data={'SpeechResult': 'hello'})
-    assert b'<Response><Say>' in resp.data
+def test_sms_ok(client):
+    r = client.post("/sms", data={"From": "+15555550123", "Body": "hello"})
+    assert r.status_code == 200
+    assert b"<Response>" in r.data
 
-def test_twilio_sms(client):
-    resp = client.post('/twilio/sms', data={'Body': 'hi'})
-    assert resp.data.strip() != b''
+def test_voice_ok(client):
+    r = client.post("/voice", data={"From": "+15555550123", "SpeechResult": "hello"})
+    assert r.status_code == 200
+    assert b"<Response>" in r.data

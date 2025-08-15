@@ -1,9 +1,14 @@
 import os
 
-def get_reply(message, session_id, persona="PHONE_AGENT"):
-    """Generates a reply based on the message and persona."""
-    if os.getenv("OPENAI_API_KEY"):
-        # Stub for provider call
+def get_reply(message: str, session_id: str, persona: str = "PHONE_AGENT") -> str:
+    """
+    Returns a reply for Twilio voice/SMS.
+    If OPENAI_API_KEY is set, pretend to call a provider (stub returns 'OK').
+    Otherwise, return a helpful fallback.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        # TODO: replace stub with real provider call
         return "OK"
-    else:
-        return "I'm having trouble connecting to the AI model. Please try again shortly."
+    base = "Thanks for contacting NEXZA"
+    return f"{base}: {message}" if message else base

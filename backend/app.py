@@ -58,6 +58,8 @@ fs_manager = FileSystemManager(base_dir=AI_BASE_DIR)
 DISCORD_SHARED_KEY = os.getenv("NEXZA_API_KEY", "").strip()
 
 # --------------- Metrics ---------------
+from backend.twilio_routes import twilio_bp
+app.register_blueprint(twilio_bp)
 class SystemMetrics:
     def __init__(self):
         self.request_count = 0
