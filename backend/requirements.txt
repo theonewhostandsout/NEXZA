@@ -1,6 +1,10 @@
-Flask
+flask
+Werkzeug==2.3.8
 flask-cors
-requests
-twilio
+flask-limiter
 python-dotenv
-gunicorn
+requests
+openai>=1.0.0
+twilio>=8.0.0
+pytest>=7.0.0
+httpx==0.25.2

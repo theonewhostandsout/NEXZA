@@ -21,36 +21,36 @@ except ImportError:
 # --- Conversation Manager ---
 class ConversationManager:
     """Thread-safe conversation history manager with automatic pruning"""
-    
+
     def __init__(self, max_history_per_session: int = 50, max_sessions: int = 100):
         self._history: Dict[str, deque] = {}
         self._max_history = max_history_per_session
         self._max_sessions = max_sessions
         self._last_access: Dict[str, datetime] = {}
         self._lock = Lock()
-    
+
     def add_message(self, session_id: str, message: Dict[str, Any], system_prompt: Optional[str] = None) -> None:
         with self._lock:
             if not self._validate_session_id(session_id):
                 raise ValueError(f"Invalid session ID: {session_id}")
-            
+
             if session_id not in self._history:
                 if len(self._history) >= self._max_sessions:
                     self._prune_old_sessions()
-                
+
                 self._history[session_id] = deque(maxlen=self._max_history)
                 prompt_content = system_prompt or Config.NEXZA_ASSISTANT_PROMPT
                 self._history[session_id].append({
                     "role": "system",
                     "content": prompt_content
                 })
-            
+
             if "timestamp" not in message:
                 message["timestamp"] = datetime.now().isoformat()
-            
+
             self._history[session_id].append(message)
             self._last_access[session_id] = datetime.now()
-    
+
     def get_history(self, session_id: str) -> List[Dict[str, Any]]:
         with self._lock:
             if session_id in self._history:
@@ -76,7 +76,7 @@ class FileIndexManager:
         self._index: Dict[str, Dict[str, Any]] = {}
         self._max_size = max_index_size
         self._lock = Lock()
-    
+
     def add_file(self, path: str, metadata: Dict[str, Any]) -> bool:
         with self._lock:
             if len(self._index) >= self._max_size:
@@ -140,14 +140,14 @@ def get_web_chat_response(user_input: str, session_id: str, fs_manager, persona:
             'ADMIN_MODE': Config.ADMIN_PROMPT
         }
         system_prompt = prompt_map.get(persona, Config.NEXZA_ASSISTANT_PROMPT)
-        
+
         # FIX: Removed extra period before 'add_message'
         conversation_manager.add_message(session_id, {"role": "user", "content": user_input}, system_prompt=system_prompt)
-        
+
         messages = conversation_manager.get_history(session_id)
-        
+
         ai_response = make_ai_request(messages, temperature=Config.AI_TEMPERATURE, max_tokens=Config.AI_MAX_TOKENS)
-        
+
         if ai_response:
             # Clean up the AI's response to remove the "internal monologue"
             clean_response = ai_response
@@ -157,7 +157,7 @@ def get_web_chat_response(user_input: str, session_id: str, fs_manager, persona:
                     # Take the greeting and everything after it
                     clean_response = ai_response[ai_response.find(greeting):]
                     break
-            
+
             conversation_manager.add_message(session_id, {"role": "assistant", "content": clean_response})
             return clean_response
         else:
@@ -171,12 +171,12 @@ def get_web_chat_response(user_input: str, session_id: str, fs_manager, persona:
 def organize_file(filename: str, file_content: str, fs_manager) -> Dict[str, Any]:
     """Organizes a file based on AI analysis."""
     analysis = analyze_file_with_ai(filename, file_content)
-    
+
     category = analysis.get('category', 'other')
     suggested_path = analysis.get('suggested_path', f"{category}/{filename}")
-    
+
     success, message = fs_manager.write_file(suggested_path, file_content)
-    
+
     if success:
         file_index_manager.add_file(suggested_path, {
             "original_name": filename,
@@ -204,7 +204,7 @@ def analyze_file_with_ai(filename: str, file_content: str) -> Dict[str, Any]:
     """Analyzes file content to determine category and metadata with a more robust prompt."""
     try:
         content_preview = file_content[:1500]
-        
+
         analysis_prompt = f"""You are a file analysis bot. Your only function is to analyze the provided file information and respond with a single, valid JSON object. Do not include any other text, greetings, or explanations.
 
 Analyze this file:
@@ -224,18 +224,18 @@ Example response:
             {"role": "system", "content": "You are a file analysis system. Respond only with a single, valid JSON object and nothing else."},
             {"role": "user", "content": analysis_prompt}
         ]
-        
+
         response_text = make_ai_request(messages, temperature=0.0, max_tokens=500)
-        
+
         if response_text:
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group())
             else:
                  logger.error("No JSON object found in the AI analysis response.")
-        
+
         return get_fallback_analysis(filename)
-        
+
     except Exception as e:
         logger.error(f"Error in AI analysis: {e}")
         return get_fallback_analysis(filename)
@@ -246,11 +246,11 @@ def validate_twilio_request(f):
     """Decorator to validate incoming Twilio requests."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if Config.DEBUG and not Config.TWILIO_ENABLED:
-             return f(*args, **kwargs)
+        if not Config.TWILIO_VALIDATE_SIGNATURE:
+            return f(*args, **kwargs)
 
         validator = RequestValidator(Config.TWILIO_AUTH_TOKEN)
-        
+
         url = request.url
         form_data = request.form
         signature = request.headers.get('X-Twilio-Signature', '')
@@ -264,7 +264,7 @@ def validate_twilio_request(f):
         else:
             logger.warning(f"Failed Twilio validation for {url}")
             return abort(403)
-            
+
     return decorated_function
 
 def sanitize_user_input(text: str, max_length: int = 10000) -> str:
@@ -276,6 +276,21 @@ def sanitize_user_input(text: str, max_length: int = 10000) -> str:
 def initialize_system(fs_manager):
     """Initializes system components like the file index."""
     logger.info("System initialization complete.")
+
+def xml_escape(s: str) -> str:
+    """Escapes a string for use in XML."""
+    import html
+    return html.escape(s or "", quote=True)
+
+def validate_phone_number(phone_number: str) -> bool:
+    """
+    Validates a phone number.
+    A simple validator for E.164 format.
+    """
+    if not isinstance(phone_number, str):
+        return False
+    # Regex for E.164 format
+    return re.match(r'^\+[1-9]\d{1,14}$', phone_number) is not None
 
 def clean_user_facing_text(text):
     import re
