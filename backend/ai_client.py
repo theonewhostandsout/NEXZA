@@ -1,89 +1,121 @@
+# backend/ai_client.py
+"""OpenAI client for generating AI responses for Twilio Voice/SMS."""
+
 import os
-import openai
 import time
-from typing import Tuple
+from typing import List, Dict
 
-from .personas import DEALERSHIP_AGENT
-from .utils import conversation_manager, logger
+from openai import OpenAI
+from .personas import PERSONAS
 
-# --- Configuration ---
-MAX_RETRIES = 3
-RETRY_DELAY_S = 2
-LANGUAGE_DETECT_THRESHOLD = 0.5  # Confidence threshold for language detection
+# ---- OpenAI client (lazy init) ------------------------------------------------
 
-# --- OpenAI Client ---
-# It's recommended to initialize the client once
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_client = None
+
+
+def _init_client():
+    global _client
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        # We'll still allow the module to load; callers will hit fallback text.
+        return
+    _client = OpenAI(api_key=api_key)
+
+# ---- Simple language detection ------------------------------------------------
+
 
 def detect_language(text: str) -> str:
     """
-    Detects the language of a given text.
-    Returns 'es' for Spanish, 'en' for English.
-    This is a simple implementation, a more robust solution would use a dedicated library.
+    Very lightweight detector. Returns 'es' for Spanish, 'en' otherwise.
     """
-    if not text or not isinstance(text, str):
-        return 'en'
-
-    # Simple keyword-based detection
-    spanish_keywords = ['hola', 'gracias', 'adiós', 'por favor', 'coche', 'auto']
+    if not isinstance(text, str) or not text:
+        return "en"
     text_lower = text.lower()
+    spanish_indicators = [
+        "hola",
+        "gracias",
+        "adiós",
+        "por favor",
+        "carro",
+        "coche",
+        "auto",
+        "camioneta",
+        "cuánto",
+        "necesito",
+        "quiero",
+    ]
+    hits = sum(1 for w in spanish_indicators if w in text_lower)
+    return "es" if hits >= 2 else "en"
 
-    if any(keyword in text_lower for keyword in spanish_keywords):
-        return 'es'
-
-    # A more advanced method could be used here, e.g., a compact language detection model
-    # For now, we default to English
-    return 'en'
+# ---- Public API ---------------------------------------------------------------
 
 
-def get_ai_response(user_input: str, session_id: str) -> Tuple[str, str]:
+def get_ai_response(
+    message: str,
+    session_id: str,
+    persona: str = "DEALERSHIP_AGENT",
+    channel: str = "voice",
+) -> str:
     """
-    Gets an AI response from OpenAI, with retries and error handling.
+    Generate an AI response using the configured persona.
+    Falls back to a friendly static message if API isn't available.
 
     Args:
-        user_input: The text from the user.
-        session_id: A unique identifier for the conversation session.
-
-    Returns:
-        A tuple containing the AI's response text and the detected language ('en' or 'es').
+        message: user input text
+        session_id: conversation/session identifier (used for future threading)
+        persona: key in PERSONAS (default: DEALERSHIP_AGENT)
+        channel: 'voice' or 'sms' (affects length/fallback)
     """
-    lang = detect_language(user_input)
-    persona = DEALERSHIP_AGENT[lang]
+    # Persona config
+    cfg = PERSONAS.get(persona, PERSONAS.get("DEFAULT", {}))
+    system_prompt = cfg.get("system_prompt", "You are a helpful assistant.")
+    temperature = cfg.get("temperature", 0.7)
+    model = cfg.get("model", "gpt-4o-mini")
+    max_tokens = cfg.get("max_tokens_voice" if channel == "voice" else "max_tokens_sms", 150)
 
-    conversation_manager.add_message(
-        session_id,
-        {"role": "user", "content": user_input},
-        system_prompt=persona["system_prompt"]
-    )
+    # Build messages
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    for ex in cfg.get("examples", []):
+        messages.append(ex)
+    messages.append({"role": "user", "content": message})
 
-    messages = conversation_manager.get_history(session_id)
+    # Try calling OpenAI
+    global _client
+    if _client is None:
+        _init_client()
 
-    for attempt in range(MAX_RETRIES):
+    if _client is None:
+        return _fallback_text(channel)
+
+    # Retry with exponential backoff
+    retries = 3
+    for attempt in range(retries):
         try:
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo", # or another suitable model
+            resp = _client.chat.completions.create(
+                model=model,
                 messages=messages,
-                temperature=0.7,
-                max_tokens=150,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                presence_penalty=0.1,
+                frequency_penalty=0.1,
             )
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                return text
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            break
 
-            ai_response = response.choices[0].message.content.strip()
+    # Final fallback on failure
+    return _fallback_text(channel)
 
-            if ai_response:
-                conversation_manager.add_message(session_id, {"role": "assistant", "content": ai_response})
-                return ai_response, lang
 
-            logger.warning(f"AI returned an empty response. Attempt {attempt + 1}/{MAX_RETRIES}")
-
-        except openai.APIError as e:
-            logger.error(f"OpenAI API error on attempt {attempt + 1}/{MAX_RETRIES}: {e}")
-        except Exception as e:
-            logger.error(f"An unexpected error occurred in get_ai_response on attempt {attempt + 1}/{MAX_RETRIES}: {e}")
-
-        # Wait before retrying
-        if attempt < MAX_RETRIES - 1:
-            time.sleep(RETRY_DELAY_S)
-
-    # If all retries fail, return the fallback response
-    logger.error(f"All {MAX_RETRIES} retries failed for session {session_id}. Returning fallback.")
-    return persona["fallback_response"], lang
+def _fallback_text(channel: str) -> str:
+    if channel == "voice":
+        return (
+            "I'm having trouble connecting to our assistant right now. "
+            "Please leave your name and number, or try again shortly."
+        )
+    return "Sorry, I'm having trouble right now. Please call us and we’ll help you directly."

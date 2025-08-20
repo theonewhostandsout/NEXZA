@@ -62,6 +62,8 @@ from .twilio_routes import twilio_bp
 app.register_blueprint(twilio_bp, url_prefix="/twilio")
 
 # --------------- Metrics ---------------
+from backend.twilio_routes import twilio_bp
+app.register_blueprint(twilio_bp)
 class SystemMetrics:
     def __init__(self):
         self.request_count = 0
