@@ -37,7 +37,7 @@ class LogConfig:
             from logging.handlers import RotatingFileHandler
             file_handler = RotatingFileHandler(
                 os.path.join(log_dir, 'nexza.log'),
-                maxBytes=10 * 1024 * 1024,  # 10MB
+                maxBytes=10*1024*1024,  # 10MB
                 backupCount=5,
                 encoding='utf-8'
             )
@@ -54,10 +54,8 @@ class LogConfig:
 
         return logger
 
-
 # Initialize logger
 logger = LogConfig.setup_logging()
-
 
 class Config:
     """Enhanced configuration class for the NEXZA AI system."""
@@ -84,11 +82,8 @@ class Config:
     HOST = os.environ.get('HOST', '0.0.0.0')
     PORT = int(os.environ.get('PORT', 5000))
 
-    # File system configuration (cross-platform default)
-    AI_BASE_DIR = os.getenv(
-        "AI_BASE_DIR",
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "nexza_data")
-    )
+    # File system configuration
+    AI_BASE_DIR = os.environ.get('AI_BASE_DIR', 'D:/NEXZA AI/')
     MAX_CONTENT_LENGTH = int(os.environ.get('MAX_FILE_SIZE_MB', 10)) * 1024 * 1024
 
     # AI/LLM configuration
@@ -158,7 +153,6 @@ You are a friendly and welcoming virtual host for "Taqueria Mexicano Grill".
     def initialize(cls):
         logger.info(f"Initializing {cls.APP_NAME} v{cls.APP_VERSION} in {cls.ENVIRONMENT} mode.")
         # Simplified for clarity
-
 
 # Initialize configuration on module load
 Config.initialize()
