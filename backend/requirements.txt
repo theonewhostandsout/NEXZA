@@ -1,6 +1,11 @@
 Flask
+Werkzeug==2.3.8
 flask-cors
+flask-limiter
 requests
 twilio
 python-dotenv
 gunicorn
+openai
+pytest
+httpx==0.25.2

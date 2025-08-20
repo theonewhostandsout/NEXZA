@@ -11,9 +11,9 @@ from datetime import datetime
 from typing import Dict, Any
 
 # ---- Your modules (unchanged) ----
-from config import Config, logger
-from filesystem_manager import FileSystemManager
-from utils import (
+from .config import Config, logger
+from .filesystem_manager import FileSystemManager
+from .utils import (
     conversation_manager,
     file_index_manager,
     get_smart_response,
@@ -57,9 +57,11 @@ fs_manager = FileSystemManager(base_dir=AI_BASE_DIR)
 # Optional shared secret for bot requests (set this in your environment if you want it enforced)
 DISCORD_SHARED_KEY = os.getenv("NEXZA_API_KEY", "").strip()
 
+# --------------- Twilio Routes ---------------
+from .twilio_routes import twilio_bp
+app.register_blueprint(twilio_bp, url_prefix="/twilio")
+
 # --------------- Metrics ---------------
-from backend.twilio_routes import twilio_bp
-app.register_blueprint(twilio_bp)
 class SystemMetrics:
     def __init__(self):
         self.request_count = 0
@@ -105,7 +107,8 @@ metrics = SystemMetrics()
 def before_request_handler():
     metrics.record_request()
     logger.info(f"Request: {request.method} {request.path} from {request.remote_addr}")
-    if request.method == "POST" and request.path != "/upload":
+    # Enforce JSON content type only for non-Twilio, non-upload POST requests
+    if request.method == "POST" and not request.path.startswith("/twilio") and request.path != "/upload":
         if (request.content_type or "").split(";")[0].strip().lower() != "application/json":
             return jsonify({"error": "Content-Type must be application/json"}), 400
     request.request_id = secrets.token_hex(8)

@@ -246,8 +246,8 @@ def validate_twilio_request(f):
     """Decorator to validate incoming Twilio requests."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if Config.DEBUG and not Config.TWILIO_ENABLED:
-             return f(*args, **kwargs)
+        if not Config.TWILIO_VALIDATE_SIGNATURE:
+            return f(*args, **kwargs)
 
         validator = RequestValidator(Config.TWILIO_AUTH_TOKEN)
         
@@ -276,6 +276,21 @@ def sanitize_user_input(text: str, max_length: int = 10000) -> str:
 def initialize_system(fs_manager):
     """Initializes system components like the file index."""
     logger.info("System initialization complete.")
+
+def xml_escape(s: str) -> str:
+    """Escapes a string for use in XML."""
+    import html
+    return html.escape(s or "", quote=True)
+
+def validate_phone_number(phone_number: str) -> bool:
+    """
+    Validates a phone number.
+    A simple validator for E.164 format.
+    """
+    if not isinstance(phone_number, str):
+        return False
+    # Regex for E.164 format
+    return re.match(r'^\+[1-9]\d{1,14}$', phone_number) is not None
 
 def clean_user_facing_text(text):
     import re
