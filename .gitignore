@@ -1,1 +1,14 @@
 demo_logs/
+
+# Python & editor artifacts
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+logs/
+
+# Prevent weird Windows absolute paths
+D/
