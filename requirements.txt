@@ -1,0 +1,6 @@
+flask
+flask-cors
+Flask-Limiter
+twilio
+openai
+python-dotenv

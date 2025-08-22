@@ -12,3 +12,6 @@ logs/
 
 # Prevent weird Windows absolute paths
 D/
+.env
+*.env
+.env.*

@@ -1,102 +1,99 @@
-from flask import Blueprint, request, Response, jsonify
-from os import getenv
+# twilio_routes.py — voice & sms routes with chunked TTS and clean prompts
+from __future__ import annotations
 
-from .utils import validate_twilio_request, xml_escape, clean_user_facing_text, logger
+import os, re
+from flask import Blueprint, request, Response
+from twilio.twiml.voice_response import VoiceResponse, Gather
+from twilio.twiml.messaging_response import MessagingResponse
+
+from .utils import logger, clean_user_facing_text, validate_twilio_request, xml_escape
 from .ai_client import get_ai_response
-from .demo_logger import log_api_call
-from .personas import DEALERSHIP_AGENT
 
-twilio_bp = Blueprint("twilio", __name__)
+twilio_bp = Blueprint("twilio_bp", __name__)
+
+VOICE_NAME = os.getenv("TWILIO_VOICE", "Polly.Joanna")
+LANG       = os.getenv("TWILIO_LANG",  "en-US")
+MAX_SAY_CHARS = 1400
+
+def _chunk_text(s: str, max_len: int = MAX_SAY_CHARS):
+    s = clean_user_facing_text(s)
+    parts, buf, total = [], [], 0
+    for tok in re.split(r"(\. |\? |! |\n)", s):
+        if not tok: continue
+        if total + len(tok) > max_len and buf:
+            parts.append("".join(buf).strip()); buf, total = [tok], len(tok)
+        else:
+            buf.append(tok); total += len(tok)
+    if buf: parts.append("".join(buf).strip())
+    return [p for p in parts if p]
+
+def say_clean(vr_or_gather, text: str):
+    text = text or ""
+    identity = re.compile(r"^\s*(hi|hello|hey)\b.*$|^\s*i\s*(am|'m)\b.*$", re.I)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    lines = [ln for ln in lines if not identity.match(ln)]
+    text  = " ".join(lines) or text
+    for part in _chunk_text(text):
+        vr_or_gather.say(part, voice=VOICE_NAME, language=LANG)
 
 @twilio_bp.route("/status", methods=["GET"])
 def twilio_status():
-    """Health check endpoint for the Twilio demo."""
-    return jsonify({"status": "ok", "message": "Twilio demo is running"}), 200
+    return {"status":"ok", "service":"twilio", "ip": request.remote_addr}
 
 @twilio_bp.route("/voice", methods=["POST"])
 @validate_twilio_request
 def twilio_voice():
-    """Handles incoming voice calls from Twilio."""
-    if not getenv("TWILIO_DEMO_ENABLED") == "true":
-        return Response("<Response><Say>This feature is not enabled.</Say></Response>", mimetype="text/xml")
+    vr = VoiceResponse()
+    session_id = request.values.get("CallSid", "voice_session")
+    user_text  = (request.values.get("SpeechResult") or "").strip()
 
-    from_number = request.form.get("From", "unknown")
-    to_number = request.form.get("To", "unknown")
+    # First hit or no speech -> prompt
+    if not user_text:
+        g = Gather(
+            input="speech",
+            language=LANG,
+            speech_timeout="auto",
+            action="/twilio/voice",
+            method="POST",
+            action_on_empty_result=True,
+        )
+        say_clean(g, "Nexza Auto. How can I help you today? You can say schedule service, check inventory, or speak with sales.")
+        vr.append(g)
+        vr.redirect("/twilio/voice")
+        return Response(str(vr), mimetype="application/xml")
 
-    # Twilio can send transcription in either SpeechResult or TranscriptionText
-    user_input = request.form.get("SpeechResult", "") or request.form.get("TranscriptionText", "")
-    session_id = f"voice:{from_number}"
+    try:
+        reply, lang = get_ai_response(user_text, session_id)
+        if not reply:
+            reply = "Got it. What can I help you with for your vehicle today?"
+    except Exception as e:
+        logger.exception("AI error: %s", e)
+        reply = "I had a problem getting that. Could you please repeat or try a simpler request?"
 
-    ai_response, lang = get_ai_response(user_input, session_id)
-
-    # Clean up response for TTS
-    response_text = clean_user_facing_text(ai_response)
-
-    # Set voice based on language
-    voice = "es-MX" if lang == "es" else "en-US"
-
-    log_api_call(
-        from_number=from_number,
-        to_number=to_number,
-        user_input=user_input,
-        ai_response=response_text,
-        success=True
+    say_clean(vr, reply)
+    g = Gather(
+        input="speech",
+        language=LANG,
+        speech_timeout="auto",
+        action="/twilio/voice",
+        method="POST",
+        action_on_empty_result=True,
     )
-
-    twiml = f'<Response><Say voice="{voice}">{xml_escape(response_text)}</Say></Response>'
-    return Response(twiml, mimetype="text/xml")
+    say_clean(g, "Anything else?")
+    vr.append(g)
+    vr.redirect("/twilio/voice")
+    return Response(str(vr), mimetype="application/xml")
 
 @twilio_bp.route("/sms", methods=["POST"])
 @validate_twilio_request
 def twilio_sms():
-    """Handles incoming SMS messages from Twilio."""
-    if not getenv("TWILIO_DEMO_ENABLED") == "true":
-        return Response("<Response><Message>This feature is not enabled.</Message></Response>", mimetype="text/xml")
-
-    from_number = request.form.get("From", "unknown")
-    to_number = request.form.get("To", "unknown")
-    user_input = request.form.get("Body", "")
-    session_id = f"sms:{from_number}"
-
-    ai_response, _ = get_ai_response(user_input, session_id)
-
-    # Clean up response for SMS
-    response_text = clean_user_facing_text(ai_response)
-
-    log_api_call(
-        from_number=from_number,
-        to_number=to_number,
-        user_input=user_input,
-        ai_response=response_text,
-        success=True
-    )
-
-    twiml = f'<Response><Message>{xml_escape(response_text)}</Message></Response>'
-    return Response(twiml, mimetype="text/xml")
-
-@twilio_bp.errorhandler(Exception)
-def handle_error(e):
-    """Generic error handler for Twilio routes."""
-    logger.error(f"An unhandled exception occurred: {e}", exc_info=True)
-
-    from_number = request.form.get("From", "unknown")
-    to_number = request.form.get("To", "unknown")
-
-    log_api_call(
-        from_number=from_number,
-        to_number=to_number,
-        user_input=request.form.get("Body") or request.form.get("SpeechResult"),
-        ai_response="",
-        success=False,
-        error_message=str(e)
-    )
-
-    # Determine if it's a voice or SMS request to provide the correct TwiML response
-    if "voice" in request.path:
-        fallback_response = DEALERSHIP_AGENT['en']['fallback_response']
-        twiml = f'<Response><Say>{xml_escape(fallback_response)}</Say></Response>'
-    else:
-        fallback_response = DEALERSHIP_AGENT['en']['fallback_response']
-        twiml = f'<Response><Message>{xml_escape(fallback_response)}</Message></Response>'
-
-    return Response(twiml, mimetype="text/xml")
+    user_text  = request.values.get("Body", "") or ""
+    session_id = request.values.get("From", "sms_session")
+    try:
+        reply, _ = get_ai_response(user_text, session_id)
+    except Exception as e:
+        logger.exception("AI error: %s", e)
+        reply = "Sorry—something went wrong. Please try again."
+    mr = MessagingResponse()
+    mr.message(clean_user_facing_text(reply))
+    return Response(str(mr), mimetype="application/xml")

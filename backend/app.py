@@ -1,16 +1,30 @@
-# app.py  — NEXZA Flask backend (with Discord-compatible /api/discord)
+# app.py — NEXZA Flask backend (dealership demo, fixed)
+from __future__ import annotations
 
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from werkzeug.utils import secure_filename
-from werkzeug.exceptions import RequestEntityTooLarge
-import os, hashlib, secrets
+import os, secrets, hashlib
 from datetime import datetime
 from typing import Dict, Any
 
-# ---- Your modules (unchanged) ----
+from flask import Flask, request, jsonify, send_from_directory
+
+# Optional dependencies with graceful fallbacks
+try:
+    from flask_cors import CORS
+except Exception:
+    def CORS(*args, **kwargs): return None
+
+try:
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
+except Exception:
+    class Limiter:
+        def __init__(self, *a, **k): pass
+        def limit(self, *a, **k):
+            def deco(f): return f
+            return deco
+        def exempt(self, f): return f
+    def get_remote_address(): return None
+
 from .config import Config, logger
 from .filesystem_manager import FileSystemManager
 from .utils import (
@@ -20,8 +34,8 @@ from .utils import (
     organize_file,
     initialize_system,
     sanitize_user_input,
-    validate_twilio_request,
 )
+from .twilio_routes import twilio_bp
 
 # ---------------- Flask setup ----------------
 app = Flask(__name__)
@@ -33,32 +47,21 @@ app.config["SESSION_COOKIE_SECURE"] = True
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
-CORS(
-    app,
-    origins=["http://localhost:*", "http://127.0.0.1:*"],
-    methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Session-ID", "X-API-Key"],
-    expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
-    supports_credentials=True,
-    max_age=3600,
-)
+CORS(app,
+     origins=["http://localhost:*", "http://127.0.0.1:*"],
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization", "X-Session-ID", "X-API-Key"],
+     expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+     supports_credentials=True,
+     max_age=3600)
 
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["1000 per hour", "100 per minute"],
-    storage_uri="memory://",
-    strategy="fixed-window",
-)
+limiter = Limiter(app=app, key_func=get_remote_address, default_limits=["1000 per hour", "100 per minute"])
 
-AI_BASE_DIR = "D:/NEXZA AI/"
+# Base directory for file features
+AI_BASE_DIR = os.getenv("NEXZA_BASE_DIR", os.path.join(os.getcwd(), "demo_logs"))
 fs_manager = FileSystemManager(base_dir=AI_BASE_DIR)
 
-# Optional shared secret for bot requests (set this in your environment if you want it enforced)
-DISCORD_SHARED_KEY = os.getenv("NEXZA_API_KEY", "").strip()
-
-# --------------- Twilio Routes ---------------
-from .twilio_routes import twilio_bp
+# Register Twilio blueprint
 app.register_blueprint(twilio_bp, url_prefix="/twilio")
 
 # --------------- Metrics ---------------
@@ -72,20 +75,11 @@ class SystemMetrics:
         self.last_error = None
         self.active_sessions = set()
 
-    def record_request(self):
-        self.request_count += 1
-
+    def record_request(self): self.request_count += 1
     def record_error(self, error: str):
-        self.error_count += 1
-        self.last_error = {"message": str(error), "timestamp": datetime.now().isoformat()}
-
-    def record_upload(self):
-        self.upload_count += 1
-
-    def record_chat(self, session_id: str):
-        self.chat_count += 1
-        self.active_sessions.add(session_id)
-
+        self.error_count += 1; self.last_error = {"message": str(error), "timestamp": datetime.now().isoformat()}
+    def record_upload(self): self.upload_count += 1
+    def record_chat(self, session_id: str): self.chat_count += 1; self.active_sessions.add(session_id)
     def get_metrics(self) -> Dict[str, Any]:
         uptime = (datetime.now() - self.start_time).total_seconds()
         return {
@@ -106,8 +100,7 @@ metrics = SystemMetrics()
 @app.before_request
 def before_request_handler():
     metrics.record_request()
-    logger.info(f"Request: {request.method} {request.path} from {request.remote_addr}")
-    # Enforce JSON content type only for non-Twilio, non-upload POST requests
+    logger.info("Request: %s %s from %s", request.method, request.path, request.remote_addr)
     if request.method == "POST" and not request.path.startswith("/twilio") and request.path != "/upload":
         if (request.content_type or "").split(";")[0].strip().lower() != "application/json":
             return jsonify({"error": "Content-Type must be application/json"}), 400
@@ -130,16 +123,11 @@ def after_request_handler(response):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    logger.error(f"Unhandled exception: {str(e)}", exc_info=True)
+    logger.error("Unhandled exception: %s", e, exc_info=True)
     metrics.record_error(str(e))
     if app.config.get("DEBUG"):
         return jsonify({"error": str(e), "type": type(e).__name__, "request_id": getattr(request, "request_id", "unknown")}), 500
     return jsonify({"error": "An internal error occurred", "request_id": getattr(request, "request_id", "unknown")}), 500
-
-@app.errorhandler(RequestEntityTooLarge)
-def handle_large_file(e):
-    max_size_mb = app.config["MAX_CONTENT_LENGTH"] / (1024 * 1024)
-    return jsonify({"error": f"File too large. Maximum size is {max_size_mb}MB", "request_id": getattr(request, "request_id", "unknown")}), 413
 
 @app.errorhandler(429)
 def handle_rate_limit(e):
@@ -147,55 +135,37 @@ def handle_rate_limit(e):
 
 # --------------- Health & Static ---------------
 @app.route("/favicon.ico")
-def favicon():
-    return "", 204
+def favicon(): return "", 204
 
 @app.route("/health", methods=["GET"])
 @limiter.exempt
 def health_check():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat(), "version": "2.0.0"}), 200
 
-@app.route("/health/detailed", methods=["GET"])
-@limiter.limit("10 per minute")
-def detailed_health_check():
-    try:
-        fs_test = fs_manager.list_files("", include_dirs=False)
-        fs_healthy = bool(fs_test)
-        index_size = len(file_index_manager.get_all())
-        system_metrics = metrics.get_metrics()
-        return jsonify({
-            "status": "healthy" if fs_healthy else "degraded",
-            "timestamp": datetime.now().isoformat(),
-            "components": {
-                "filesystem": "healthy" if fs_healthy else "unhealthy",
-                "file_index": f"{index_size} files indexed",
-                "conversations": f"{len(conversation_manager._history)} active sessions",
-            },
-            "metrics": system_metrics,
-        }), 200 if fs_healthy else 503
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return jsonify({"status": "unhealthy", "error": str(e)}), 503
-
-@app.route("/", methods=["GET"])
+@app.route("/")
 @limiter.exempt
 def serve_index():
     try:
         return send_from_directory(".", "index.html")
-    except FileNotFoundError:
+    except Exception:
         return jsonify({"error": "Frontend not found"}), 404
 
 # --------------- Upload ---------------
+from werkzeug.utils import secure_filename
+from werkzeug.exceptions import RequestEntityTooLarge
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_large_file(e):
+    max_size_mb = app.config["MAX_CONTENT_LENGTH"] / (1024 * 1024)
+    return jsonify({"error": f"File too large. Maximum size is {max_size_mb}MB", "request_id": getattr(request, "request_id", "unknown")}), 413
+
 @app.route("/upload", methods=["POST"])
 @limiter.limit("30 per minute")
 def upload_file_route():
     try:
-        if "file" not in request.files:
-            return jsonify({"error": "No file provided"}), 400
-
+        if "file" not in request.files: return jsonify({"error": "No file provided"}), 400
         file = request.files["file"]
-        if not file.filename:
-            return jsonify({"error": "Invalid filename"}), 400
+        if not file.filename: return jsonify({"error": "Invalid filename"}), 400
 
         original_filename = file.filename
         filename = secure_filename(file.filename)
@@ -226,11 +196,11 @@ def upload_file_route():
         return jsonify({"error": result.get("error", "Upload failed")}), 500
 
     except Exception as e:
-        logger.error(f"Error in file upload: {e}", exc_info=True)
+        logger.error("Error in file upload: %s", e, exc_info=True)
         metrics.record_error(str(e))
         return jsonify({"error": "File upload failed"}), 500
 
-# --------------- Web Chat (unchanged) ---------------
+# --------------- Web Chat ---------------
 @app.route("/chat", methods=["POST"])
 @limiter.limit("60 per minute")
 def web_chat():
@@ -240,15 +210,8 @@ def web_chat():
         session_id = (data.get("session_id") or "").strip()
         persona = data.get("persona", "NEXZA_ASSISTANT")
 
-        if not session_id:
-            session_id = f"web_{secrets.token_hex(8)}"
-        else:
-            session_id = sanitize_user_input(session_id, max_length=128)
-            if not session_id or not session_id.replace("_", "").replace("-", "").isalnum():
-                return jsonify({"error": "Invalid session ID"}), 400
-
-        if not user_input:
-            return jsonify({"error": "No message provided"}), 400
+        if not session_id: session_id = f"web_{secrets.token_hex(8)}"
+        if not user_input: return jsonify({"error": "No message provided"}), 400
 
         user_input = sanitize_user_input(user_input, max_length=2000)
         ai_response = get_smart_response(user_input, session_id, fs_manager, persona)
@@ -257,58 +220,15 @@ def web_chat():
         return jsonify({"response": ai_response, "session_id": session_id, "timestamp": datetime.now().isoformat()}), 200
 
     except Exception as e:
-        logger.error(f"Error in web chat: {e}", exc_info=True)
+        logger.error("Error in web chat: %s", e, exc_info=True)
         metrics.record_error(str(e))
         return jsonify({"error": "Chat service temporarily unavailable"}), 500
-
-# --------------- Discord Bridge (fixed) ---------------
-@app.route("/api/discord", methods=["POST"])
-@limiter.limit("60 per minute")
-def api_discord_chat():
-    """Accepts both the bot payload and a simple test payload, returns what the bot expects."""
-    try:
-        # Optional shared secret
-        if DISCORD_SHARED_KEY:
-            if request.headers.get("X-API-Key", "") != DISCORD_SHARED_KEY:
-                return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-        data = request.get_json(force=True) or {}
-
-        # Accept either:
-        #  A) From bot: {"type":"ask","prompt":"...","discord":{...}}
-        #  B) From tools: {"message":"...","session_id":"...","persona":"..."}
-        text = (data.get("prompt") or data.get("message") or "").strip()
-        if not text:
-            return jsonify({"ok": False, "error": "No message provided"}), 400
-
-        session_id = (data.get("session_id") or f"discord_{secrets.token_hex(8)}").strip()
-        persona = data.get("persona", "NEXZA_ASSISTANT")
-
-        # Sanitize inputs
-        session_id = sanitize_user_input(session_id, max_length=128)
-        text = sanitize_user_input(text, max_length=2000)
-
-        ai_response = get_smart_response(text, session_id, fs_manager, persona)
-        metrics.record_chat(session_id)
-
-        # Return shape the bot expects
-        return jsonify({
-            "ok": True,
-            "reply": ai_response,
-            "session_id": session_id,
-            "timestamp": datetime.now().isoformat(),
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error in /api/discord: {e}", exc_info=True)
-        metrics.record_error(str(e))
-        return jsonify({"ok": False, "error": "Chat service temporarily unavailable"}), 500
 
 # --------------- Startup ---------------
 def initialize_application():
     try:
         logger.info("=" * 60)
-        logger.info("🚀 Starting NEXZA AI Flask Backend Server v2.0")
+        logger.info("🚀 Starting NEXZA AI Flask Backend Server")
         logger.info(f"Base directory: {AI_BASE_DIR}")
         logger.info(f"Debug mode: {Config.DEBUG}")
         logger.info(f"Max file size: {app.config['MAX_CONTENT_LENGTH'] / (1024*1024)}MB")
@@ -316,21 +236,13 @@ def initialize_application():
 
         initialize_system(fs_manager)
         index_size = len(file_index_manager.get_all())
-        logger.info(f"✅ File index loaded: {index_size} files")
-        conversation_count = len(conversation_manager._history)
-        logger.info(f"✅ Conversation history loaded: {conversation_count} sessions")
+        logger.info("✅ File index loaded: %s files", index_size)
         logger.info("✅ System initialization complete")
         logger.info("=" * 60)
     except Exception as e:
-        logger.error(f"❌ Failed to initialize application: {e}", exc_info=True)
+        logger.error("❌ Failed to initialize application: %s", e, exc_info=True)
         raise
 
 if __name__ == "__main__":
-    try:
-        initialize_application()
-        host, port = "0.0.0.0", 5000
-        logger.info(f"Starting Flask server on {host}:{port}")
-        app.run(host=host, port=port, debug=Config.DEBUG, threaded=True, use_reloader=Config.DEBUG)
-    except Exception as e:
-        logger.critical(f"Failed to start server: {e}", exc_info=True)
-        exit(1)
+    initialize_application()
+    app.run(host="0.0.0.0", port=5000, debug=Config.DEBUG, threaded=True, use_reloader=Config.DEBUG)

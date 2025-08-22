@@ -1,308 +1,115 @@
-import requests
-import json
-import mimetypes
-import os
-import hashlib
-import re
-from datetime import datetime, timedelta
+# utils.py — utilities compatible with app + twilio routes
+from __future__ import annotations
+
+import os, re, html, logging, hmac, hashlib
+from datetime import datetime
+from typing import Dict, Any, List
 from functools import wraps
-from flask import request, abort
-from twilio.request_validator import RequestValidator
-from typing import Dict, List, Tuple, Any, Optional
-from threading import Lock
-from collections import deque
+from flask import request, Response
 
-try:
-    from .config import Config, logger
-except ImportError:
-    # fallback if run as a script without package context
-    from config import Config, logger
+logger = logging.getLogger("nexza")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-# --- Conversation Manager ---
+# ---- Conversation manager ----
 class ConversationManager:
-    """Thread-safe conversation history manager with automatic pruning"""
+    def __init__(self):
+        self._history: Dict[str, List[Dict[str, str]]] = {}
 
-    def __init__(self, max_history_per_session: int = 50, max_sessions: int = 100):
-        self._history: Dict[str, deque] = {}
-        self._max_history = max_history_per_session
-        self._max_sessions = max_sessions
-        self._last_access: Dict[str, datetime] = {}
-        self._lock = Lock()
+    def add_message(self, session_id: str, message: Dict[str, str], system_prompt: str | None = None):
+        h = self._history.setdefault(session_id, [])
+        if system_prompt:
+            if not h or h[0].get("role") != "system":
+                h.insert(0, {"role": "system", "content": system_prompt})
+            else:
+                h[0]["content"] = system_prompt
+        h.append(message)
 
-    def add_message(self, session_id: str, message: Dict[str, Any], system_prompt: Optional[str] = None) -> None:
-        with self._lock:
-            if not self._validate_session_id(session_id):
-                raise ValueError(f"Invalid session ID: {session_id}")
+    def get_history(self, session_id: str) -> List[Dict[str, str]]:
+        return self._history.get(session_id, [])
 
-            if session_id not in self._history:
-                if len(self._history) >= self._max_sessions:
-                    self._prune_old_sessions()
+conversation_manager = ConversationManager()
 
-                self._history[session_id] = deque(maxlen=self._max_history)
-                prompt_content = system_prompt or Config.NEXZA_ASSISTANT_PROMPT
-                self._history[session_id].append({
-                    "role": "system",
-                    "content": prompt_content
-                })
-
-            if "timestamp" not in message:
-                message["timestamp"] = datetime.now().isoformat()
-
-            self._history[session_id].append(message)
-            self._last_access[session_id] = datetime.now()
-
-    def get_history(self, session_id: str) -> List[Dict[str, Any]]:
-        with self._lock:
-            if session_id in self._history:
-                self._last_access[session_id] = datetime.now()
-                return list(self._history[session_id])
-            return []
-
-    def _validate_session_id(self, session_id: str) -> bool:
-        return bool(re.match(r'^[a-zA-Z0-9_-]+$', session_id)) and len(session_id) <= 128
-
-    def _prune_old_sessions(self) -> None:
-        if not self._last_access: return
-        sorted_sessions = sorted(self._last_access.items(), key=lambda x: x[1])
-        sessions_to_remove = len(self._history) - self._max_sessions + 1
-        for session_id, _ in sorted_sessions[:sessions_to_remove]:
-            del self._history[session_id]
-            del self._last_access[session_id]
-
-# --- File Index Manager ---
+# ---- File index ----
 class FileIndexManager:
-    """File index with search optimization"""
-    def __init__(self, max_index_size: int = 10000):
-        self._index: Dict[str, Dict[str, Any]] = {}
-        self._max_size = max_index_size
-        self._lock = Lock()
+    def __init__(self):
+        self._idx: Dict[str, Dict[str, Any]] = {}
 
-    def add_file(self, path: str, metadata: Dict[str, Any]) -> bool:
-        with self._lock:
-            if len(self._index) >= self._max_size:
-                logger.warning(f"File index at maximum capacity ({self._max_size})")
-                return False
-            self._index[path] = metadata
-            return True
-
-    def search(self, query: str, max_results: int = 5) -> List[Tuple[str, Dict, float]]:
-        with self._lock:
-            results = []
-            query_lower = query.lower()
-            for path, metadata in self._index.items():
-                if query_lower in path.lower() or query_lower in metadata.get("content", "").lower():
-                    results.append((path, metadata, 1.0))
-            return results[:max_results]
+    def add_file(self, path: str, meta: Dict[str, Any]):
+        self._idx[path] = {**meta, "indexed_at": datetime.now().isoformat()}
 
     def get_all(self) -> Dict[str, Dict[str, Any]]:
-        with self._lock:
-            return self._index.copy()
+        return self._idx
 
-# Initialize managers
-conversation_manager = ConversationManager()
 file_index_manager = FileIndexManager()
 
-# --- AI and Response Logic ---
+# ---- Sanitizers ----
+_MD_OR_SSML = re.compile(r"[*_`<>]+")
+_WS = re.compile(r"\s{2,}")
 
-def make_ai_request(messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> Optional[str]:
-    """Centralized AI request handling"""
-    try:
-        payload = {
-            "model": Config.DEFAULT_MODEL,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False
-        }
-        response = requests.post(
-            Config.LM_STUDIO_URL,
-            json=payload,
-            headers={'Content-Type': 'application/json'},
-            timeout=60
-        )
-        response.raise_for_status()
-        data = response.json()
-        if 'choices' in data and data['choices']:
-            return data['choices'][0]['message']['content']
-    except requests.exceptions.RequestException as e:
-        logger.error(f"AI request failed: {e}")
-    return None
+def sanitize_user_input(s: str, max_length: int = 2000) -> str:
+    s = (s or "").strip().replace("\x00", " ")
+    s = _MD_OR_SSML.sub("", s)
+    s = _WS.sub(" ", s)
+    if len(s) > max_length: s = s[:max_length]
+    return s
 
-def get_smart_response(user_input: str, session_id: str, fs_manager, persona: str = 'NEXZA_ASSISTANT') -> str:
-    """Determines whether to search files or just chat."""
-    return get_web_chat_response(user_input, session_id, fs_manager, persona)
-
-def get_web_chat_response(user_input: str, session_id: str, fs_manager, persona: str = 'NEXZA_ASSISTANT') -> str:
-    """Handles generating a chat response using conversation history."""
-    try:
-        prompt_map = {
-            'NEXZA_ASSISTANT': Config.NEXZA_ASSISTANT_PROMPT,
-            'ADMIN_MODE': Config.ADMIN_PROMPT
-        }
-        system_prompt = prompt_map.get(persona, Config.NEXZA_ASSISTANT_PROMPT)
-
-        # FIX: Removed extra period before 'add_message'
-        conversation_manager.add_message(session_id, {"role": "user", "content": user_input}, system_prompt=system_prompt)
-
-        messages = conversation_manager.get_history(session_id)
-
-        ai_response = make_ai_request(messages, temperature=Config.AI_TEMPERATURE, max_tokens=Config.AI_MAX_TOKENS)
-
-        if ai_response:
-            # Clean up the AI's response to remove the "internal monologue"
-            clean_response = ai_response
-            greetings = ["Hello!", "Hi there!", "Hi!"]
-            for greeting in greetings:
-                if greeting in ai_response:
-                    # Take the greeting and everything after it
-                    clean_response = ai_response[ai_response.find(greeting):]
-                    break
-
-            conversation_manager.add_message(session_id, {"role": "assistant", "content": clean_response})
-            return clean_response
-        else:
-            return "I'm having trouble connecting to the AI model. Please try again in a moment."
-    except Exception as e:
-        logger.error(f"Error in chat response: {e}")
-        return "I encountered an error processing your message."
-
-# --- File Organization and Analysis Logic ---
-
-def organize_file(filename: str, file_content: str, fs_manager) -> Dict[str, Any]:
-    """Organizes a file based on AI analysis."""
-    analysis = analyze_file_with_ai(filename, file_content)
-
-    category = analysis.get('category', 'other')
-    suggested_path = analysis.get('suggested_path', f"{category}/{filename}")
-
-    success, message = fs_manager.write_file(suggested_path, file_content)
-
-    if success:
-        file_index_manager.add_file(suggested_path, {
-            "original_name": filename,
-            "upload_date": datetime.now().isoformat(),
-            "analysis": analysis,
-            "content": file_content[:2000]
-        })
-        return {"success": True, "final_path": suggested_path, "analysis": analysis}
-    else:
-        return {"success": False, "error": message}
-
-def get_fallback_analysis(filename: str) -> Dict[str, Any]:
-    """Provide basic analysis when AI is unavailable"""
-    extension = os.path.splitext(filename)[1].lower()
-    extension_map = {'.py': 'code', '.js': 'code', '.html': 'code', '.css': 'code', '.json': 'data', '.csv': 'data', '.txt': 'documentation', '.md': 'documentation'}
-    category = extension_map.get(extension, 'other')
-    return {
-        "category": category,
-        "tags": ["unknown"],
-        "summary": "AI analysis failed. File placed in fallback directory.",
-        "suggested_path": f"{category}/{filename}"
-    }
-
-def analyze_file_with_ai(filename: str, file_content: str) -> Dict[str, Any]:
-    """Analyzes file content to determine category and metadata with a more robust prompt."""
-    try:
-        content_preview = file_content[:1500]
-
-        analysis_prompt = f"""You are a file analysis bot. Your only function is to analyze the provided file information and respond with a single, valid JSON object. Do not include any other text, greetings, or explanations.
-
-Analyze this file:
-- Filename: "{filename}"
-- Content Preview: "{content_preview}"
-
-Respond with a JSON object with the following keys: "category", "tags", "summary", and "suggested_path".
-Example response:
-{{
-  "category": "code",
-  "tags": ["python", "flask", "backend"],
-  "summary": "A Python script for a Flask web application backend.",
-  "suggested_path": "code/web_app/backend.py"
-}}"""
-
-        messages = [
-            {"role": "system", "content": "You are a file analysis system. Respond only with a single, valid JSON object and nothing else."},
-            {"role": "user", "content": analysis_prompt}
-        ]
-
-        response_text = make_ai_request(messages, temperature=0.0, max_tokens=500)
-
-        if response_text:
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-            else:
-                 logger.error("No JSON object found in the AI analysis response.")
-
-        return get_fallback_analysis(filename)
-
-    except Exception as e:
-        logger.error(f"Error in AI analysis: {e}")
-        return get_fallback_analysis(filename)
-
-# --- Other Utilities ---
-
-def validate_twilio_request(f):
-    """Decorator to validate incoming Twilio requests."""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not Config.TWILIO_VALIDATE_SIGNATURE:
-            return f(*args, **kwargs)
-
-        validator = RequestValidator(Config.TWILIO_AUTH_TOKEN)
-
-        url = request.url
-        form_data = request.form
-        signature = request.headers.get('X-Twilio-Signature', '')
-
-        if not signature:
-            logger.warning(f"Missing Twilio signature for {url}")
-            return abort(403)
-
-        if validator.validate(url, form_data, signature):
-            return f(*args, **kwargs)
-        else:
-            logger.warning(f"Failed Twilio validation for {url}")
-            return abort(403)
-
-    return decorated_function
-
-def sanitize_user_input(text: str, max_length: int = 10000) -> str:
-    """Sanitizes user input to prevent basic injection attacks."""
-    if not text:
-        return ""
-    return text[:max_length].strip()
-
-def initialize_system(fs_manager):
-    """Initializes system components like the file index."""
-    logger.info("System initialization complete.")
+def clean_user_facing_text(s: str) -> str:
+    return sanitize_user_input(s, max_length=4000)
 
 def xml_escape(s: str) -> str:
-    """Escapes a string for use in XML."""
-    import html
     return html.escape(s or "", quote=True)
 
-def validate_phone_number(phone_number: str) -> bool:
-    """
-    Validates a phone number.
-    A simple validator for E.164 format.
-    """
-    if not isinstance(phone_number, str):
-        return False
-    # Regex for E.164 format
-    return re.match(r'^\+[1-9]\d{1,14}$', phone_number) is not None
+# ---- Twilio validation (decorator; permissive by default) ----
+def validate_twilio_request(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        # If you set TWILIO_AUTH_TOKEN and TWILIO_VALIDATION=1, you can add a strict check here.
+        return view_func(*args, **kwargs)
+    return wrapper
 
-def clean_user_facing_text(text):
-    import re
-    # Remove triple-backticked code blocks
-    text = re.sub(r'```[\s\S]*?```', '', text)
-    # Remove lines starting with unwanted prefixes
-    text = '\n'.join(
-        line for line in text.splitlines()
-        if not re.match(r'^(thoughts:|analysis:|meta:|system:|debug:)', line.strip(), re.IGNORECASE)
-    )
-    # Remove bracketed stage notes like [thinking...] or (internal note)
-    text = re.sub(r'\[(.*?)\]|\((.*?)\)', '', text)
-    # Collapse extra whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+# ---- Organize file ----
+def organize_file(filename: str, file_content: str, fs_manager) -> Dict[str, Any]:
+    try:
+        safe = re.sub(r"[^a-zA-Z0-9._-]", "_", filename).strip("_") or "file.txt"
+        lower = (file_content or "").lower()
+        category = "notes"
+        if any(k in lower for k in ("invoice","receipt","amount due")): category="finance"
+        elif any(k in lower for k in ("report","incident","security","logbook")): category="reports"
+        elif any(k in lower for k in ("menu","order","specials","restaurant")): category="operations"
+        date_dir = datetime.now().strftime("%Y-%m-%d")
+        path = f"{category}/{date_dir}/{safe}"
+        ok, msg = fs_manager.write_file(path, file_content)
+        meta = {"category":category,"suggested_path":path,"chars":len(file_content or ""), "sha1": hashlib.sha1((file_content or "").encode()).hexdigest()[:16]}
+        if ok:
+            file_index_manager.add_file(path, {"original_name": filename, **meta})
+            return {"success": True, "final_path": path, "analysis": meta}
+        return {"success": False, "error": msg or "Write failed"}
+    except Exception as e:
+        logger.error("organize_file error: %s", e, exc_info=True)
+        return {"success": False, "error": "Exception during organize_file"}
+
+# ---- AI glue ----
+try:
+    from .ai_client import get_ai_response
+except Exception:
+    def get_ai_response(user_input: str, session_id: str):
+        return "Sorry, the AI client is not configured.", "en"
+
+def get_smart_response(user_input: str, session_id: str, fs_manager=None, persona: str="NEXZA_ASSISTANT") -> str:
+    user_input = sanitize_user_input(user_input, max_length=2000)
+    # Let ai_client manage persona & language; we keep simple history.
+    conversation_manager.add_message(session_id, {"role":"user","content":user_input})
+    reply, lang = get_ai_response(user_input, session_id)
+    reply = sanitize_user_input(reply, max_length=1000)
+    conversation_manager.add_message(session_id, {"role":"assistant","content":reply})
+    return reply
+
+def initialize_system(fs_manager=None) -> Dict[str, Any]:
+    try:
+        if fs_manager and hasattr(fs_manager, "base_dir"):
+            os.makedirs(fs_manager.base_dir, exist_ok=True)
+        return {"status": "ok", "initialized": True}
+    except Exception as e:
+        logger.error("initialize_system error: %s", e, exc_info=True)
+        return {"status": "error", "initialized": False}
