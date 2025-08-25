@@ -1,0 +1,11 @@
+flask
+gunicorn
+openai>=1.0.0
+twilio>=8.0.0
+requests
+python-dotenv
+Werkzeug==2.3.8
+pytest>=7.0.0
+httpx==0.25.2
+flask-cors
+flask-limiter

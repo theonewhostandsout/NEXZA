@@ -91,7 +91,7 @@ def organize_file(filename: str, file_content: str, fs_manager) -> Dict[str, Any
 
 # ---- AI glue ----
 try:
-    from .ai_client import get_ai_response
+    from ai_client import get_ai_response
 except Exception:
     def get_ai_response(user_input: str, session_id: str):
         return "Sorry, the AI client is not configured.", "en"
